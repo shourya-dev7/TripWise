@@ -601,6 +601,7 @@ function App() {
                           className="destination-card external-place-card"
                           key={place.xid}
                         >
+                          
                           <div className="external-place-art">
                             {place.image && (
                               <img
@@ -608,11 +609,11 @@ function App() {
                                 src={place.image}
                                 alt={place.name || 'Attraction'}
                                 loading="lazy"
+                                onLoad={(event) => {
+                                  event.currentTarget.style.display = 'block'
+                                }}
                                 onError={(event) => {
                                   event.currentTarget.style.display = 'none'
-                                  event.currentTarget.parentElement.classList.add(
-                                    'image-unavailable',
-                                  )
                                 }}
                               />
                             )}
@@ -629,6 +630,7 @@ function App() {
                               {categoryName || 'Point of interest'}
                             </span>
                           </div>
+
 
                           <div className="card-body">
                             <h3>{place.name || 'Unnamed attraction'}</h3>
