@@ -6,6 +6,12 @@ TripWise is a full-stack travel-planning web application that helps users explor
 **Backend API:** https://tripwise-backend-4t2x.onrender.com/  
 **GitHub Repository:** https://github.com/shourya-dev7/TripWise
 
+**Selected Track:** Full-Stack Development
+
+**External API:** OpenTripMap API for discovering nearby attractions.
+
+**Deployment:** Frontend and backend hosted on Render, with PostgreSQL hosted on Neon.
+
 ## Features
 
 - **Destination Discovery:** Explore destinations and discover attractions using the OpenTripMap API.
