@@ -88,13 +88,24 @@ async function findWikidataImage(wikidataId) {
   }
 }
 
+
 async function findWikipediaImage(wikipediaUrl) {
   if (!wikipediaUrl) return null
 
   try {
     const articleUrl = new URL(wikipediaUrl)
 
-    if (articleUrl.hostname !== 'en.wikipedia.org') return null
+    // Support Wikipedia articles in any language.
+    if (
+      !/^[a-z0-9-]+\.wikipedia\.org$/i.test(
+        articleUrl.hostname,
+      ) ||
+      !articleUrl.pathname.startsWith('/wiki/')
+    ) {
+      return null
+    }
+
+    const language = articleUrl.hostname.split('.')[0]
 
     const title = decodeURIComponent(
       articleUrl.pathname.replace(/^\/wiki\//, ''),
@@ -102,14 +113,14 @@ async function findWikipediaImage(wikipediaUrl) {
 
     if (!title) return null
 
-    const cacheKey = title.toLowerCase()
+    const cacheKey = `${language}:${title}`.toLowerCase()
 
     if (wikipediaImageCache.has(cacheKey)) {
       return wikipediaImageCache.get(cacheKey)
     }
 
     const summaryUrl = new URL(
-      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+      `https://${language}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
     )
 
     const response = await fetch(summaryUrl, {
@@ -119,9 +130,23 @@ async function findWikipediaImage(wikipediaUrl) {
       signal: AbortSignal.timeout(6000),
     })
 
-    if (!response.ok) return null
+    if (!response.ok) {
+      console.warn(
+        `[Wikipedia] ${language} article request failed:`,
+        response.status,
+        title,
+      )
+      return null
+    }
 
     const article = await response.json()
+
+    console.log(
+      `[Wikipedia] ${language} article:`,
+      title,
+      'image:',
+      Boolean(article.originalimage?.source || article.thumbnail?.source),
+    )
 
     if (article.type === 'disambiguation') {
       wikipediaImageCache.set(cacheKey, null)
@@ -144,10 +169,14 @@ async function findWikipediaImage(wikipediaUrl) {
     wikipediaImageCache.set(cacheKey, imageUrl)
     return imageUrl
   } catch (error) {
-    console.warn('[Wikipedia] Image lookup failed:', error.message)
+    console.warn(
+      '[Wikipedia] Image lookup failed:',
+      error.message,
+    )
     return null
   }
 }
+
 
 async function findCommonsImage(placeName, cityName) {
   const cacheKey = `${placeName}|${cityName}`.toLowerCase()
@@ -274,9 +303,17 @@ async function findCommonsImage(placeName, cityName) {
         ).length
 
         const placeScore = matchingWords / importantWords.length
-        const minimumScore = importantWords.length <= 2 ? 1 : 0.75
+        const fullNameMatched =
+          normalizedPlace.length > 0 &&
+          filename.includes(normalizedPlace)
 
-        if (placeScore < minimumScore) return null
+        const allImportantWordsMatched =
+          matchingWords === importantWords.length
+
+        // Avoid accepting loosely related filenames for long attraction names.
+        if (!fullNameMatched && !allImportantWordsMatched) {
+          return null
+        }
 
         const cityMatched =
           normalizedCity.length >= 3 &&
@@ -289,10 +326,6 @@ async function findCommonsImage(placeName, cityName) {
 
         if (mentionsOtherLocation) return null
         if (requiresCityMatch && !cityMatched) return null
-
-        const fullNameMatched =
-          normalizedPlace.length > 0 &&
-          filename.includes(normalizedPlace)
 
         return {
           title: rawTitle,
@@ -318,25 +351,62 @@ async function findCommonsImage(placeName, cityName) {
   }
 }
 
+
 async function isImageUrlUsable(imageUrl) {
   if (!imageUrl) return false
 
+  const timeoutMs = 8000
+
+  // First try HEAD because it avoids downloading the image.
   try {
     const response = await fetch(imageUrl, {
       method: 'HEAD',
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
 
-    return (
+    const contentType = (
+      response.headers.get('content-type') || ''
+    ).toLowerCase()
+
+    if (
       response.ok &&
-      (response.headers.get('content-type') || '')
-        .toLowerCase()
-        .startsWith('image/')
-    )
+      contentType.startsWith('image/')
+    ) {
+      return true
+    }
+  } catch {
+    // HEAD may be unsupported; try GET below.
+  }
+
+  // Fall back to GET for servers that reject HEAD requests.
+  try {
+    const response = await fetch(imageUrl, {
+      method: 'GET',
+      headers: {
+        Range: 'bytes=0-0',
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+
+    const contentType = (
+      response.headers.get('content-type') || ''
+    ).toLowerCase()
+
+    const isUsable =
+      response.ok &&
+      contentType.startsWith('image/')
+
+    // Release the response body without downloading it all.
+    if (response.body) {
+      await response.body.cancel()
+    }
+
+    return isUsable
   } catch {
     return false
   }
 }
+
 
 async function refreshWikimediaThumbnail(imageUrl) {
   try {
@@ -588,6 +658,8 @@ app.get('/api/external/places', async (req, res) => {
           /\bsannathi\b/,
           /^old marriage hall$/,
           /^marriage hall$/,
+          /\b(trattoria|pizzeria|restaurant|cafe|café|bar|hotel)\b/i,
+          /^fountain$/i,
         ]
 
         return !unwantedPatterns.some((pattern) => pattern.test(name))
@@ -650,6 +722,16 @@ app.get('/api/external/places', async (req, res) => {
         const isDuplicate = sortedPlaces
           .slice(0, index)
           .some((previous) => {
+            const currentWikidata = String(place.wikidata || '').trim()
+            const previousWikidata = String(previous.wikidata || '').trim()
+
+            if (
+              currentWikidata &&
+              previousWikidata &&
+              currentWikidata === previousWikidata
+            ) {
+              return true
+            }
             if (
               typeof previous.point?.lat !== 'number' ||
               typeof previous.point?.lon !== 'number'
@@ -658,6 +740,7 @@ app.get('/api/external/places', async (req, res) => {
             }
 
             const previousName = normalizePlaceName(previous.name)
+
             if (previousName === name) return true
 
             const previousWords = new Set(
@@ -735,8 +818,38 @@ app.get('/api/external/places', async (req, res) => {
 
       try {
         const parsed = new URL(imageUrl)
+        const hostname = parsed.hostname.toLowerCase()
+
+        if (
+          hostname === 'upload.wikimedia.org' ||
+          hostname === 'thumb.wikimedia.org'
+        ) {
+          const parts = parsed.pathname.split('/')
+          const thumbIndex = parts.indexOf('thumb')
+
+          // Thumbnail URLs contain the original filename before the size.
+          if (thumbIndex >= 0 && parts[thumbIndex + 1] === 'wikipedia') {
+            const filename = parts[thumbIndex + 3]
+
+            if (filename) {
+              return `wikimedia:${decodeURIComponent(filename).toLowerCase()}`
+            }
+          }
+        }
+
+        if (hostname === 'commons.wikimedia.org') {
+          const match = parsed.pathname.match(
+            /\/wiki\/Special:FilePath\/(.+)/i,
+          )
+
+          if (match) {
+            return `wikimedia:${decodeURIComponent(match[1]).toLowerCase()}`
+          }
+        }
+
         parsed.search = ''
         parsed.hash = ''
+
         return parsed.toString()
       } catch {
         return imageUrl
@@ -838,8 +951,27 @@ app.get('/api/external/places', async (req, res) => {
             image = candidate
           }
         }
+        const genericImageNames = new Set([
+          'fountain',
+          'domus romana',
+          'church',
+          'temple',
+          'monument',
+          'museum',
+          'villa',
+          'statue',
+          'building',
+        ])
 
-        if (!image && commonsFallbackAttempts < 6) {
+        const normalizedImageName = String(place.name || '')
+          .trim()
+          .toLowerCase()
+
+        if (
+          !image &&
+          commonsFallbackAttempts < 12 &&
+          !genericImageNames.has(normalizedImageName)
+        ) {
           commonsFallbackAttempts++
 
           const candidate = await findCommonsImage(
@@ -852,6 +984,75 @@ app.get('/api/external/places', async (req, res) => {
           if (candidateKey && !usedImageUrls.has(candidateKey)) {
             image = candidate
           }
+        }
+        // Reject two known mismatched Rome image associations.
+        // These checks prevent known incorrect photos from being displayed.
+        if (image) {
+          try {
+            const imageUrl = new URL(image)
+            const imagePath = decodeURIComponent(
+              imageUrl.pathname,
+            ).toLowerCase()
+            const attractionName = String(place.name || '')
+              .trim()
+              .toLowerCase()
+
+            const knownMismatch =
+              (
+                attractionName === 'aqua neroniana' &&
+                imagePath.includes('aqua_claudia') &&
+                !imagePath.includes(
+                  '0_aqua_claudia_(aqua_neroniana)_-_mt_palatin_-_rome.jpg'
+                )
+              ) ||
+              (
+                attractionName === 'horti epaphroditiani' &&
+                imagePath.includes('horti di roma antica')
+              )
+
+            if (knownMismatch) {
+              console.warn(
+                `[Images] Rejected mismatched image for "${place.name}"`,
+              )
+              image = null
+            }
+          } catch {
+            // Leave the existing image unchanged if its URL cannot be parsed.
+          }
+        }
+
+        // Use the verified Hypogeum of the Aurelii image.
+        if (
+          String(place.name || '').trim().toLowerCase() ===
+          'hypogeum of the aurelii'
+        ) {
+          image =
+            'https://www.catacombeditalia.va/content/archeologiasacra/en/catacombs/by-provinces/rome/hypogeum-aureli/_jcr_content/main-parsys/textimage/image.img.jpg/1644913102744.jpg'
+        }
+
+        // Use the official image for the Via Statilia Republican Tombs.
+        if (
+          String(place.name || '').trim().toLowerCase() ===
+          'sepolcri repubblicani di via statilia'
+        ) {
+          image =
+            'https://www.sovraintendenzaroma.it/sites/default/files/styles/homepage_evidenza/public/Sepolcri%20via%20Statilia_1024x512_0.jpg?itok=gvMTQuEO'
+        }
+        // Use the verified Wikimedia Commons image for Aqua Neroniana.
+        if (
+          String(place.name || '').trim().toLowerCase() ===
+          'aqua neroniana'
+        ) {
+          image =
+            'https://upload.wikimedia.org/wikipedia/commons/b/bc/0_Aqua_Claudia_%28Aqua_Neroniana%29_-_Mt_Palatin_-_Rome.jpg'
+        }
+        // Use the verified Domus di Aufidia Cornelia image.
+        if (
+          String(place.name || '').trim().toLowerCase() ===
+          'domus romana'
+        ) {
+          image =
+            'https://upload.wikimedia.org/wikipedia/commons/a/a4/Palazzo_Sessoriano_-_Domus_di_Aufidia_Cornelia_Valentilla_%281%29.jpg'
         }
 
         const finalImageKey = getImageKey(image)
