@@ -1054,6 +1054,14 @@ app.get('/api/external/places', async (req, res) => {
           image =
             'https://upload.wikimedia.org/wikipedia/commons/a/a4/Palazzo_Sessoriano_-_Domus_di_Aufidia_Cornelia_Valentilla_%281%29.jpg'
         }
+        // Use the working original Wikimedia image for Horti Liciniani.
+        if (
+          String(place.name || '').trim().toLowerCase() ===
+          'horti liciniani'
+        ) {
+          image =
+            'https://upload.wikimedia.org/wikipedia/commons/f/fc/Esquilino_-_tempio_di_Minerva_medica_-_Horti_liciniani_2055.JPG'
+        }
 
         const finalImageKey = getImageKey(image)
 
