@@ -967,3 +967,31 @@ button:disabled {
   z-index: 2;
   max-width: calc(100% - 20px);
 }
+
+
+.estimated-budget {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  background: #f3f6f2;
+  border-radius: 10px;
+}
+
+.estimated-budget span {
+  font-size: 11px;
+  color: #68766b;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.estimated-budget strong {
+  font-size: 18px;
+  color: #244b35;
+}
+
+.estimated-budget small {
+  font-size: 11px;
+  color: #788078;
+}

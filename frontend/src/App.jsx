@@ -480,6 +480,14 @@ function App() {
                           {destination.description}
                         </p>
 
+                        {destination.estimated_budget && (
+                          <p className="estimated-budget">
+                            <span>Estimated 5-day budget</span>
+                            <strong>{destination.estimated_budget}</strong>
+                            <small>Per person · Excluding flights</small>
+                          </p>
+                        )}
+
                         <button
                           className="text-button"
                           onClick={() => setSelected(destination)}
@@ -766,6 +774,14 @@ function App() {
                         {destination.description}
                       </p>
 
+                      {destination.estimated_budget && (
+                        <p className="estimated-budget">
+                          <span>Estimated 5-day budget</span>
+                          <strong>{destination.estimated_budget}</strong>
+                          <small>Per person · Excluding flights</small>
+                        </p>
+                      )}
+
                       <button
                         className="remove-button"
                         onClick={() => removeDestination(destination.id)}
@@ -823,6 +839,14 @@ function App() {
 
               <p className="location">⌖ {selected.country}</p>
               <p>{selected.description}</p>
+
+              {selected.estimated_budget && (
+                <div className="estimated-budget">
+                  <span>Estimated 5-day budget</span>
+                  <strong>{selected.estimated_budget}</strong>
+                  <small>Per person · Excluding flights</small>
+                </div>
+              )}
 
               {actionError && <p>{actionError}</p>}
 

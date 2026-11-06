@@ -185,14 +185,16 @@ async function findCommonsImage(placeName, cityName) {
     return commonsImageCache.get(cacheKey)
   }
 
+    
   const normalize = (value) =>
     String(value || '')
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/&/g, ' and ')
-      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
       .trim()
+
 
   const ignoredWords = new Set([
     'the', 'and', 'for', 'with', 'from', 'of', 'in', 'at',
@@ -203,18 +205,25 @@ async function findCommonsImage(placeName, cityName) {
     'monument', 'memorial', 'museum', 'park', 'garden',
   ])
 
-  const importantWords = normalize(placeName)
+  
+  const normalizedPlace = normalize(placeName)
+  const normalizedCity = normalize(cityName)
+
+  const hasJapaneseCharacters = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(
+    placeName,
+  )
+
+  const importantWords = normalizedPlace
     .split(/\s+/)
     .filter((word) => word.length > 2 && !ignoredWords.has(word))
 
-  if (!importantWords.length) return null
+  if (!importantWords.length && !hasJapaneseCharacters) return null
 
-  const normalizedPlace = normalize(placeName)
-  const normalizedCity = normalize(cityName)
 
   const queries = [
     `"${placeName}" "${cityName}"`,
     `"${placeName}"`,
+    `${placeName} ${cityName}`,
   ]
 
   const locationMarkers = [
@@ -421,8 +430,6 @@ async function refreshWikimediaThumbnail(imageUrl) {
       return imageUrl
     }
 
-    if (!(await waitForCommonsRateLimit())) return null
-
     const parts = parsedUrl.pathname.split('/')
     const thumbIndex = parts.indexOf('thumb')
     const filename = parts[thumbIndex + 3]
@@ -431,58 +438,79 @@ async function refreshWikimediaThumbnail(imageUrl) {
 
     const decodedFilename = decodeURIComponent(filename)
 
-    const params = new URLSearchParams({
-      action: 'query',
-      titles: `File:${decodedFilename}`,
-      prop: 'imageinfo',
-      iiprop: 'url|mime',
-      iiurlwidth: '500',
-      format: 'json',
-    })
+    // Try standard thumbnail widths, largest first.
+    const thumbnailWidths = [500, 330, 250]
 
-    const response = await fetch(
-      `https://commons.wikimedia.org/w/api.php?${params}`,
-      {
-        headers: {
-          'User-Agent': 'TripWiseTravelPlanner/1.0 (student project)',
+    for (const width of thumbnailWidths) {
+      if (!(await waitForCommonsRateLimit())) return null
+
+      const params = new URLSearchParams({
+        action: 'query',
+        titles: `File:${decodedFilename}`,
+        prop: 'imageinfo',
+        iiprop: 'url|mime',
+        iiurlwidth: String(width),
+        format: 'json',
+      })
+
+      const response = await fetch(
+        `https://commons.wikimedia.org/w/api.php?${params}`,
+        {
+          headers: {
+            'User-Agent': 'TripWiseTravelPlanner/1.0 (student project)',
+          },
+          signal: AbortSignal.timeout(8000),
         },
-        signal: AbortSignal.timeout(8000),
-      },
+      )
+
+      if (response.status === 429) {
+        commonsRateLimitedUntil = Date.now() + 60_000
+        return null
+      }
+
+      if (!response.ok) continue
+
+      const result = await response.json()
+      const info = Object.values(result.query?.pages || {})[0]
+        ?.imageinfo?.[0]
+
+      if (!info?.thumburl) continue
+
+      const thumbnailUrl = new URL(info.thumburl)
+      const mime = info.thumbmime || info.mime || ''
+
+      if (
+        !['upload.wikimedia.org', 'thumb.wikimedia.org'].includes(
+          thumbnailUrl.hostname,
+        ) ||
+        !mime.startsWith('image/')
+      ) {
+        continue
+      }
+
+      // Verify the URL works before returning it.
+      if (await isImageUrlUsable(info.thumburl)) {
+        console.log(
+          `[Wikimedia] Refreshed thumbnail: ${width}px`,
+        )
+        return info.thumburl
+      }
+    }
+
+    console.warn(
+      `[Wikimedia] No usable thumbnail found for ${decodedFilename}`,
     )
 
-    if (response.status === 429) {
-      commonsRateLimitedUntil = Date.now() + 60_000
-      return null
-    }
-
-    if (!response.ok) return null
-
-    const result = await response.json()
-    const info = Object.values(result.query?.pages || {})[0]
-      ?.imageinfo?.[0]
-
-    if (!info?.thumburl) return null
-
-    const thumbnailUrl = new URL(info.thumburl)
-
-    if (
-      !['upload.wikimedia.org', 'thumb.wikimedia.org'].includes(
-        thumbnailUrl.hostname,
-      )
-    ) {
-      return null
-    }
-
-    const mime = info.thumbmime || info.mime
-
-    if (mime && !mime.startsWith('image/')) return null
-
-    return info.thumburl
+    return null
   } catch (error) {
-    console.warn('[Wikimedia] Thumbnail refresh failed:', error.message)
+    console.warn(
+      '[Wikimedia] Thumbnail refresh failed:',
+      error.message,
+    )
     return null
   }
 }
+
 
 app.get('/api/external/places', async (req, res) => {
   const requestStartedAt = Date.now()
@@ -813,48 +841,60 @@ app.get('/api/external/places', async (req, res) => {
     const usedImageUrls = new Set()
     const placesWithDetails = []
 
+    
     function getImageKey(imageUrl) {
-      if (!imageUrl) return null
+    if (!imageUrl) return null
 
-      try {
-        const parsed = new URL(imageUrl)
-        const hostname = parsed.hostname.toLowerCase()
+    try {
+      const parsed = new URL(imageUrl)
+      const hostname = parsed.hostname.toLowerCase()
+
+      if (
+        hostname === 'upload.wikimedia.org' ||
+        hostname === 'thumb.wikimedia.org'
+      ) {
+        const parts = parsed.pathname.split('/')
+        const thumbIndex = parts.indexOf('thumb')
 
         if (
-          hostname === 'upload.wikimedia.org' ||
-          hostname === 'thumb.wikimedia.org'
+          thumbIndex >= 0 &&
+          parts[thumbIndex + 1] === 'wikipedia'
         ) {
-          const parts = parsed.pathname.split('/')
-          const thumbIndex = parts.indexOf('thumb')
+          // Original filename in a thumbnail path.
+          const filename = parts[thumbIndex + 3]
 
-          // Thumbnail URLs contain the original filename before the size.
-          if (thumbIndex >= 0 && parts[thumbIndex + 1] === 'wikipedia') {
-            const filename = parts[thumbIndex + 3]
-
-            if (filename) {
-              return `wikimedia:${decodeURIComponent(filename).toLowerCase()}`
-            }
+          if (filename) {
+            return `wikimedia:${decodeURIComponent(filename).toLowerCase()}`
           }
         }
 
-        if (hostname === 'commons.wikimedia.org') {
-          const match = parsed.pathname.match(
-            /\/wiki\/Special:FilePath\/(.+)/i,
-          )
+        // Original Wikimedia image URL.
+        const filename = parts[parts.length - 1]
 
-          if (match) {
-            return `wikimedia:${decodeURIComponent(match[1]).toLowerCase()}`
-          }
+        if (filename) {
+          return `wikimedia:${decodeURIComponent(filename).toLowerCase()}`
         }
-
-        parsed.search = ''
-        parsed.hash = ''
-
-        return parsed.toString()
-      } catch {
-        return imageUrl
       }
+
+      if (hostname === 'commons.wikimedia.org') {
+        const match = parsed.pathname.match(
+          /\/wiki\/Special:FilePath\/(.+)/i,
+        )
+
+        if (match) {
+          return `wikimedia:${decodeURIComponent(match[1]).toLowerCase()}`
+        }
+      }
+
+      parsed.search = ''
+      parsed.hash = ''
+
+      return parsed.toString()
+    } catch {
+      return imageUrl
     }
+  }
+    
 
     function addPlaceResult(placeResult) {
       placesWithDetails.push(placeResult)
@@ -936,19 +976,39 @@ app.get('/api/external/places', async (req, res) => {
 
         if (!image && place.wikidata) {
           const candidate = await findWikidataImage(place.wikidata)
+
+          console.log(
+            `[Images] Wikidata lookup for "${place.name}":`,
+            candidate ? 'FOUND' : 'NOT FOUND',
+          )
+
           const candidateKey = getImageKey(candidate)
 
           if (candidateKey && !usedImageUrls.has(candidateKey)) {
             image = candidate
+          } else if (candidateKey) {
+            console.log(
+              `[Images] Wikidata image already used for "${place.name}"`,
+            )
           }
         }
 
         if (!image && details.wikipedia) {
           const candidate = await findWikipediaImage(details.wikipedia)
+
+          console.log(
+            `[Images] Wikipedia lookup for "${place.name}":`,
+            candidate ? 'FOUND' : 'NOT FOUND',
+          )
+
           const candidateKey = getImageKey(candidate)
 
           if (candidateKey && !usedImageUrls.has(candidateKey)) {
             image = candidate
+          } else if (candidateKey) {
+            console.log(
+              `[Images] Wikipedia image already used for "${place.name}"`,
+            )
           }
         }
         const genericImageNames = new Set([
@@ -977,6 +1037,10 @@ app.get('/api/external/places', async (req, res) => {
           const candidate = await findCommonsImage(
             place.name,
             resolvedCity,
+          )
+          console.log(
+            `[Images] Commons lookup for "${place.name}":`,
+            candidate ? 'FOUND' : 'NOT FOUND',
           )
 
           const candidateKey = getImageKey(candidate)
@@ -1061,6 +1125,15 @@ app.get('/api/external/places', async (req, res) => {
         ) {
           image =
             'https://upload.wikimedia.org/wikipedia/commons/f/fc/Esquilino_-_tempio_di_Minerva_medica_-_Horti_liciniani_2055.JPG'
+        }
+        if (place.name === 'KDDI Building') {
+          image =
+            'https://upload.wikimedia.org/wikipedia/commons/f/f1/KDDI_Office_Building_Shinjuku_2007-01_cropped.jpg'
+        }
+
+        if (place.name === 'Shinjuku Monolith Building') {
+          image =
+            'https://upload.wikimedia.org/wikipedia/commons/0/05/Shinjuku-Monolith-Building-02.jpg'
         }
 
         const finalImageKey = getImageKey(image)
@@ -1148,7 +1221,7 @@ app.get('/api/health', (req, res) => {
 app.get('/api/destinations', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, country, category, price, description, image
+      `SELECT id, name, country, category, price, description, image, estimated_budget
        FROM destinations
        ORDER BY id`,
     )
