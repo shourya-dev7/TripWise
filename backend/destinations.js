@@ -142,7 +142,7 @@ export const destinations = [
     category: 'Mountain',
     price: '$$$',
     description: 'Turquoise lakes, dramatic mountains and stunning natural scenery.',
-    image: 'image: 'https://images.unsplash.com/photo-1511497584788-876760111969?auto=format&fit=crop&w=900&q=80',',
+    image: 'https://images.unsplash.com/photo-1511497584788-876760111969?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 17,
